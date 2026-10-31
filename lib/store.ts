@@ -1,12 +1,45 @@
 import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { AgentEvent, CaseRecord, ChatMessage } from "./types";
 import { getSupabase } from "./supabase";
 
-// Slice 1 store: in-memory source of truth so the chat works locally
-// with no external services. Every event is also best-effort appended
-// to Supabase when configured (TECH_BRIEF section 3: append-only events).
-const cases = new Map<string, CaseRecord>();
-const events: AgentEvent[] = [];
+// Slice 1 store: JSON file persistence so cases survive server restarts,
+// crashes and dev-server module reloads (an in-memory-only Map loses every
+// case, surfacing as "Case not found." on the next request). Every read goes
+// to disk, so two local servers also share state. Supabase wiring for real
+// persistence comes later; events are additionally best-effort appended to
+// Supabase when configured (TECH_BRIEF section 3: append-only events).
+const STORE_FILE = join(process.cwd(), ".data", "clearway-store.json");
+
+interface PersistedStore {
+  cases: CaseRecord[];
+  events: AgentEvent[];
+}
+
+function blankStore(): PersistedStore {
+  return { cases: [], events: [] };
+}
+
+function loadStore(): PersistedStore {
+  try {
+    const raw = readFileSync(STORE_FILE, "utf8");
+    const parsed = JSON.parse(raw) as Partial<PersistedStore>;
+    return {
+      cases: Array.isArray(parsed.cases) ? parsed.cases : [],
+      events: Array.isArray(parsed.events) ? parsed.events : [],
+    };
+  } catch {
+    return blankStore();
+  }
+}
+
+function saveStore(store: PersistedStore): void {
+  mkdirSync(dirname(STORE_FILE), { recursive: true });
+  const tmp = `${STORE_FILE}.tmp`;
+  writeFileSync(tmp, JSON.stringify(store));
+  renameSync(tmp, STORE_FILE);
+}
 
 function now(): string {
   return new Date().toISOString();
@@ -24,18 +57,24 @@ export function createCase(note: string | null): CaseRecord {
     createdAt: now(),
     updatedAt: now(),
   };
-  cases.set(record.id, record);
+  const store = loadStore();
+  store.cases.push(record);
+  saveStore(store);
   void appendEvent(record.id, "case.created", { note });
-  return record;
+  return getCase(record.id) as CaseRecord;
 }
 
 export function getCase(caseId: string): CaseRecord | null {
-  return cases.get(caseId) ?? null;
+  return loadStore().cases.find((record) => record.id === caseId) ?? null;
 }
 
 export function saveCase(record: CaseRecord): void {
   record.updatedAt = now();
-  cases.set(record.id, record);
+  const store = loadStore();
+  const index = store.cases.findIndex((entry) => entry.id === record.id);
+  if (index >= 0) store.cases[index] = record;
+  else store.cases.push(record);
+  saveStore(store);
 }
 
 export function appendMessage(
@@ -49,8 +88,15 @@ export function appendMessage(
     text,
     createdAt: now(),
   };
+  const store = loadStore();
+  const current = store.cases.find((entry) => entry.id === record.id);
+  if (current) {
+    current.messages.push(message);
+    current.updatedAt = now();
+    saveStore(store);
+  }
   record.messages.push(message);
-  saveCase(record);
+  record.updatedAt = now();
   return message;
 }
 
@@ -66,7 +112,9 @@ export function appendEvent(
     payload,
     createdAt: now(),
   };
-  events.push(event);
+  const store = loadStore();
+  store.events.push(event);
+  saveStore(store);
 
   const supabase = getSupabase();
   if (supabase) {
@@ -87,5 +135,5 @@ export function appendEvent(
 }
 
 export function listEvents(caseId: string): AgentEvent[] {
-  return events.filter((event) => event.caseId === caseId);
+  return loadStore().events.filter((event) => event.caseId === caseId);
 }

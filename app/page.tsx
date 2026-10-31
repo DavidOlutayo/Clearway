@@ -14,25 +14,41 @@ async function postJson(url: string, body: unknown) {
   return data;
 }
 
+function BubbleLabelValue({ text }: { text: string }) {
+  return (
+    <>
+      {text.split("\n").map((line, index, lines) => {
+        const sep = line.indexOf(": ");
+        const content =
+          sep === -1 ? (
+            line
+          ) : (
+            <>
+              <span className="text-gray-500">{line.slice(0, sep)}:</span>{" "}
+              <span className="font-semibold text-gray-900">{line.slice(sep + 2)}</span>
+            </>
+          );
+        return (
+          <span key={index}>
+            {content}
+            {index < lines.length - 1 ? "\n" : ""}
+          </span>
+        );
+      })}
+    </>
+  );
+}
+
 function Bubble({ message }: { message: ChatMessage }) {
   const mine = message.role === "user";
   return (
-    <div style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start" }}>
+    <div className={`flex ${mine ? "justify-end" : "justify-start"}`}>
       <pre
-        style={{
-          background: mine ? "#1f6feb" : "#ffffff",
-          color: mine ? "#ffffff" : "#111111",
-          padding: "10px 12px",
-          borderRadius: 10,
-          maxWidth: "85%",
-          whiteSpace: "pre-wrap",
-          fontFamily: "inherit",
-          fontSize: 14,
-          margin: "4px 0",
-          border: mine ? "none" : "1px solid #e2ded4",
-        }}
+        className={`my-1 max-w-[85%] whitespace-pre-wrap rounded-xl px-3 py-2.5 font-sans text-sm shadow-sm ${
+          mine ? "bg-blue-600 text-white" : "border border-gray-100 bg-white text-stone-900"
+        }`}
       >
-        {message.text}
+        {mine ? message.text : <BubbleLabelValue text={message.text} />}
       </pre>
     </div>
   );
@@ -68,29 +84,48 @@ function DiscrepancyRow({
 
   if (disc.resolved) {
     return (
-      <div style={{ fontSize: 13, padding: "6px 0", color: "#2f6b2f" }}>
+      <div className="py-1.5 text-[13px] text-green-700">
         ✓ {disc.label}: using “{disc.resolvedValue}”
       </div>
     );
   }
   return (
-    <div style={{ border: "1px solid #e2ded4", borderRadius: 8, padding: 8, margin: "6px 0", background: "#fff" }}>
-      <div style={{ fontSize: 13, fontWeight: 600 }}>
-        {disc.severity}: {disc.label}
+    <div className="my-1.5 rounded-xl border border-gray-100 bg-white p-2 shadow-sm">
+      <div className="text-[13px] font-semibold">
+        <span
+          className={`rounded-md px-2 py-1 text-xs font-bold ${
+            disc.severity === "Blocking"
+              ? "bg-red-50 text-red-700"
+              : disc.severity === "Check"
+                ? "bg-amber-50 text-amber-700"
+                : "bg-gray-100 text-gray-600"
+          }`}
+        >
+          {disc.severity}
+        </span>
+        : {disc.label}
       </div>
-      <div style={{ fontSize: 13 }}>“{disc.valueA}” ({disc.sourceA}) vs “{disc.valueB}” ({disc.sourceB})</div>
-      <div style={{ fontSize: 12, color: "#555", margin: "4px 0" }}>{disc.suggestion}</div>
+      <div className="text-[13px]">“{disc.valueA}” ({disc.sourceA}) vs “{disc.valueB}” ({disc.sourceB})</div>
+      <div className="my-1 text-xs text-stone-600">{disc.suggestion}</div>
       <input
         value={reason}
         onChange={(event) => setReason(event.target.value)}
         placeholder="Reason (optional)"
-        style={{ fontSize: 13, padding: 6, width: "100%", boxSizing: "border-box", marginBottom: 6 }}
+        className="mb-1.5 w-full rounded-lg border border-stone-300 px-2 py-1.5 text-[13px] outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
       />
-      <div style={{ display: "flex", gap: 8 }}>
-        <button disabled={busy} onClick={() => resolveWith(disc.valueA)}>
+      <div className="flex gap-2">
+        <button
+          disabled={busy}
+          onClick={() => resolveWith(disc.valueA)}
+          className="rounded-lg bg-gray-900 px-4 py-2 text-[13px] font-medium text-white shadow-sm transition-all hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-gray-900"
+        >
           Use “{disc.valueA.slice(0, 24)}”
         </button>
-        <button disabled={busy} onClick={() => resolveWith(disc.valueB)}>
+        <button
+          disabled={busy}
+          onClick={() => resolveWith(disc.valueB)}
+          className="rounded-lg bg-gray-900 px-4 py-2 text-[13px] font-medium text-white shadow-sm transition-all hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-gray-900"
+        >
           Use “{disc.valueB.slice(0, 24)}”
         </button>
       </div>
@@ -141,15 +176,25 @@ export default function ChatPage() {
       return;
     }
     setBusy(true);
+    let caseId = "";
     try {
       const created = await postJson("/api/cases", { note });
-      const caseId = (created.caseId as string) ?? "";
+      caseId = (created.caseId as string) ?? "";
       const form = new FormData();
       for (const file of Array.from(files).slice(0, 8)) form.append("files", file);
-      await fetch(`/api/cases/${caseId}/upload`, { method: "POST", body: form });
+      const upload = await fetch(`/api/cases/${caseId}/upload`, { method: "POST", body: form });
+      if (!upload.ok) {
+        const err = (await upload.json().catch(() => ({}))) as { error?: unknown };
+        throw new Error(typeof err.error === "string" ? err.error : "Upload failed.");
+      }
       await refresh(caseId);
       await runProcess(caseId);
     } catch (error) {
+      // The server records failures as chat messages; show them so a
+      // failed start never leaves the chat looking dead.
+      if (caseId !== "") {
+        await refresh(caseId).catch(() => undefined);
+      }
       alert(error instanceof Error ? error.message : "Start failed.");
     } finally {
       setBusy(false);
@@ -171,23 +216,33 @@ export default function ChatPage() {
   }
 
   return (
-    <main style={{ maxWidth: 680, margin: "0 auto", padding: 16 }}>
-      <h1 style={{ fontSize: 20 }}>Clearway — shipment readiness</h1>
-      <p style={{ fontSize: 14, color: "#555" }}>
+    <main className="mx-auto max-w-[680px] p-4">
+      <h1 className="mb-1 text-xl font-semibold tracking-tight text-stone-900">Clearway — shipment readiness</h1>
+      <p className="mb-4 text-sm text-stone-600">
         Upload the client bundle. I read it, compare documents, and flag disagreements. You decide what is correct.
       </p>
 
       {!record && (
-        <section style={{ background: "#fff", border: "1px solid #e2ded4", borderRadius: 10, padding: 12 }}>
+        <section className="rounded-xl border border-stone-200 bg-white p-3 shadow-sm">
           <input
             value={note}
             onChange={(event) => setNote(event.target.value)}
             placeholder="Short note (optional), e.g. Ghana → Kenya, textiles"
-            style={{ width: "100%", boxSizing: "border-box", padding: 8, marginBottom: 8 }}
+            className="mb-2 w-full rounded-lg border border-stone-300 px-2 py-2 text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
           />
-          <input ref={fileRef} type="file" accept="image/*,application/pdf" multiple />
-          <div style={{ marginTop: 8 }}>
-            <button disabled={busy} onClick={startCase}>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*,application/pdf"
+            multiple
+            className="text-sm text-stone-600 file:mr-3 file:rounded-lg file:border-0 file:bg-stone-100 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-stone-700 hover:file:bg-stone-200"
+          />
+          <div className="mt-2">
+            <button
+              disabled={busy}
+              onClick={startCase}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-all hover:scale-105 hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100"
+            >
               {busy ? "Working…" : "Start case"}
             </button>
           </div>
@@ -203,29 +258,33 @@ export default function ChatPage() {
           </section>
 
           {record.discrepancies.length > 0 && (
-            <section style={{ marginTop: 12 }}>
-              <h2 style={{ fontSize: 15 }}>Disagreements</h2>
+            <section className="mt-3">
+              <h2 className="mb-1 text-[15px] font-semibold text-stone-900">Disagreements</h2>
               {record.discrepancies.map((disc) => (
                 <DiscrepancyRow key={disc.id} disc={disc} caseId={record.id} onResolved={setRecord} />
               ))}
             </section>
           )}
 
-          <section style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          <section className="mt-3 flex gap-2">
             <input
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") void send();
               }}
-              placeholder='Correct me ("the quantity is 500") or ask "what\'s missing?"'
-              style={{ flex: 1, padding: 10 }}
+              placeholder={'Correct me ("the quantity is 500") or ask "what\'s missing?"'}
+              className="flex-1 rounded-lg border border-stone-300 px-3 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
             />
-            <button disabled={busy} onClick={() => void send()}>
+            <button
+              disabled={busy}
+              onClick={() => void send()}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-all hover:scale-105 hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100"
+            >
               Send
             </button>
           </section>
-          <p style={{ fontSize: 12, color: "#777" }}>
+          <p className="mt-2 text-xs text-stone-500">
             Case {record.id.slice(0, 8)} · {record.status} · {record.documents.length} documents
           </p>
         </>

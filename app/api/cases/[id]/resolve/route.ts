@@ -16,14 +16,14 @@ export async function POST(
     return NextResponse.json({ error: "discrepancyId and correctValue are required." }, { status: 400 });
   }
   try {
-    const message = resolveDiscrepancy(
+    const messages = resolveDiscrepancy(
       params.id,
       body.discrepancyId,
       body.correctValue.slice(0, 500),
       typeof body.reason === "string" ? body.reason.slice(0, 500) : undefined,
     );
     const record = getCase(params.id);
-    return NextResponse.json({ message, case: record });
+    return NextResponse.json({ messages, case: record });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Resolve failed.";
     return NextResponse.json({ error: message }, { status: 400 });

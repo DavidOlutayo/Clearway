@@ -1,5 +1,5 @@
-import { CorrectionSchema, type CorrectionOutput } from "../../schemas";
-import { getModelClient, modelName } from "../../model";
+import { CorrectionSchema, type CorrectionOutput } from "../schemas";
+import { getModelClient, modelName } from "../model";
 
 // Parses a plain-language correction ("the quantity is 500 cartons")
 // into a structured field update. Returns null when the text is not a
@@ -21,7 +21,9 @@ export async function parseCorrection(
     const completion = await client.chat.completions.create({
       model: modelName(),
       temperature: 0,
-      max_tokens: 300,
+      // Headroom above the model's thinking tokens; too small a budget
+      // truncates the JSON answer (finish_reason length) every time.
+      max_tokens: 2000,
       response_format: { type: "json_object" },
       messages: [{ role: "user", content: prompt }],
     });

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { CaseFacts, Discrepancy, Severity, StoredDocument } from "../../types";
+import type { CaseFacts, Discrepancy, Severity, StoredDocument } from "../types";
 
 type FactKey = keyof CaseFacts;
 
@@ -85,7 +85,7 @@ export function crosscheckDocuments(documents: StoredDocument[]): CrosscheckResu
     const valueA = String(rawValue(first, spec.key));
     const valueB = String(rawValue(conflict, spec.key));
     discrepancies.push({
-      id: stableId(spec.key, valueA, valueB),
+      id: stableId(String(spec.key), valueA, valueB),
       severity: spec.severity,
       field: spec.key,
       label: spec.label,

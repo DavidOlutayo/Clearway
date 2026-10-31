@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { config } from "./config";
-import { MAX_FILES_PER_CASE, isSupportedMime, sha256Hex } from "./files";
+import { MAX_DOCS_PER_FILE, MAX_FILES_PER_CASE, isSupportedMime, sha256Hex } from "./files";
 import { formatDiscrepancyCard, formatDocumentSummary } from "./format";
-import { appendEvent, appendMessage, getCase } from "./store";
+import { appendEvent, appendMessage, getCase, saveCase } from "./store";
 import { takePending } from "./pending";
 import { crosscheckDocuments, preserveResolved } from "./tools/crosscheckDocuments";
 import { extractDocuments } from "./tools/extractDocuments";
@@ -79,6 +79,16 @@ function say(record: CaseRecord, out: ChatMessage[], text: string): void {
   out.push(appendMessage(record, "assistant", text));
 }
 
+// Single status rule (PRD F3.4): a case needs input iff a Blocking
+// discrepancy is still open. Notes and unreadable files surface as
+// messages, never as a status no user action can clear.
+export function recomputeStatus(record: CaseRecord): void {
+  const blockingOpen = record.discrepancies.some(
+    (disc) => disc.severity === "Blocking" && !disc.resolved,
+  );
+  record.status = blockingOpen ? "needs_input" : "ready";
+}
+
 function coerceValue(field: string, raw: string): string | number {
   if (!NUMERIC_FIELDS.has(field)) return raw;
   const numeric = Number(raw.replace(/[^0-9.\-]/g, ""));
@@ -124,57 +134,73 @@ export async function processPendingFiles(caseId: string): Promise<ChatMessage[]
     }
 
     const created: StoredDocument[] = [];
-    const toExtract: { index: number; fileName: string; mimeType: string; buffer: Buffer }[] = [];
+    const toExtract: { fileName: string; mimeType: string; buffer: Buffer }[] = [];
     for (const file of fresh) {
-      const doc: StoredDocument = {
-        id: randomUUID(),
-        fileName: file.fileName,
-        mimeType: file.mimeType,
-        sizeBytes: file.buffer.length,
-        sha256: sha256Hex(file.buffer),
-        extraction: null,
-        createdAt: new Date().toISOString(),
-      };
       if (!isSupportedMime(file.mimeType)) {
-        doc.extraction = {
-          docType: "unsupported",
-          docTypeConfidence: 1,
-          fields: {},
-          fieldConfidence: {},
-          unreadable: true,
-          note: `${file.fileName} is not a supported photo or PDF; please send another copy.`,
-        };
+        created.push({
+          id: randomUUID(),
+          fileName: file.fileName,
+          mimeType: file.mimeType,
+          sizeBytes: file.buffer.length,
+          sha256: sha256Hex(file.buffer),
+          extraction: {
+            docType: "unsupported",
+            docTypeConfidence: 1,
+            fields: {},
+            fieldConfidence: {},
+            unreadable: true,
+            note: `${file.fileName} is not a supported photo or PDF; please send another copy.`,
+          },
+          createdAt: new Date().toISOString(),
+        });
         appendEvent(caseId, "file.unreadable", { fileName: file.fileName, reason: "unsupported-type" });
       } else {
-        toExtract.push({ index: created.length, fileName: file.fileName, mimeType: file.mimeType, buffer: file.buffer });
+        toExtract.push({ fileName: file.fileName, mimeType: file.mimeType, buffer: file.buffer });
       }
-      created.push(doc);
     }
-    record.documents.push(...created);
 
+    const capped: string[] = [];
     if (toExtract.length > 0) {
       guard.count("extract_documents", { files: toExtract.length });
       const { extractions, tokens } = await extractDocuments(toExtract);
       appendEvent(caseId, "extraction.completed", { files: toExtract.length, tokens });
+      // One file can yield several logical documents; each becomes its
+      // own case entry so cross-checking compares them (PRD F3).
       for (let i = 0; i < toExtract.length; i++) {
-        created[toExtract[i].index].extraction = extractions[i];
-        if (extractions[i].unreadable) {
-          appendEvent(caseId, "file.unreadable", { fileName: toExtract[i].fileName });
-        }
+        const parts = extractions[i] ?? [];
+        const kept = parts.slice(0, MAX_DOCS_PER_FILE);
+        if (parts.length > kept.length) capped.push(toExtract[i].fileName);
+        kept.forEach((extraction, partIndex) => {
+          const fileName =
+            kept.length > 1 ? `${toExtract[i].fileName} · part ${partIndex + 1}` : toExtract[i].fileName;
+          created.push({
+            id: randomUUID(),
+            fileName,
+            mimeType: toExtract[i].mimeType,
+            sizeBytes: toExtract[i].buffer.length,
+            sha256: sha256Hex(toExtract[i].buffer),
+            extraction,
+            createdAt: new Date().toISOString(),
+          });
+          if (extraction.unreadable) {
+            appendEvent(caseId, "file.unreadable", { fileName });
+          }
+        });
       }
     }
+    record.documents.push(...created);
 
     guard.count("crosscheck_documents", { documents: record.documents.length });
     const { discrepancies, unchecked } = crosscheckDocuments(record.documents);
     record.discrepancies = preserveResolved(record.discrepancies, discrepancies);
     record.unchecked = unchecked;
     const blocking = record.discrepancies.filter((d) => d.severity === "Blocking" && !d.resolved);
-    const unreadable = record.documents.filter((d) => d.extraction?.unreadable);
-    record.status = blocking.length > 0 || unreadable.length > 0 ? "needs_input" : "ready";
+    recomputeStatus(record);
     appendEvent(caseId, "crosscheck.completed", {
       discrepancies: record.discrepancies.length,
       blocking: blocking.length,
     });
+    saveCase(record);
 
     const recognised = created
       .filter((d) => d.extraction && !d.extraction.unreadable)
@@ -192,6 +218,9 @@ export async function processPendingFiles(caseId: string): Promise<ChatMessage[]
     }
     if (skipped.length > 0) {
       say(record, out, `Kept the first ${MAX_FILES_PER_CASE} files; skipped ${skipped.length}: ${skipped.map((f) => f.fileName).join(", ")}.`);
+    }
+    if (capped.length > 0) {
+      say(record, out, `Kept the first ${MAX_DOCS_PER_FILE} documents in ${capped.join(", ")}; split the rest into a separate upload.`);
     }
 
     const open = record.discrepancies.filter((d) => !d.resolved);
@@ -296,9 +325,16 @@ export async function applyUserText(caseId: string, text: string): Promise<ChatM
     const { discrepancies, unchecked } = crosscheckDocuments(record.documents);
     record.discrepancies = preserveResolved(record.discrepancies, discrepancies);
     record.unchecked = unchecked;
+    saveCase(record);
     const after = record.discrepancies.filter((d) => !d.resolved).length;
 
+    const wasInput = record.status === "needs_input";
+    recomputeStatus(record);
+    saveCase(record);
     say(record, out, `Updated ${parsed.field} to "${coerced}" in ${target.fileName}. Open disagreements: ${before} → ${after}.`);
+    if (wasInput && record.status === "ready") {
+      say(record, out, "All blocking issues are resolved. Status: ready.");
+    }
     const newlyOpen = record.discrepancies.filter((d) => !d.resolved).slice(0, 3);
     for (const disc of newlyOpen) say(record, out, formatDiscrepancyCard(disc));
     return true;
@@ -314,7 +350,7 @@ export function resolveDiscrepancy(
   discrepancyId: string,
   correctValue: string,
   reason?: string,
-): ChatMessage {
+): ChatMessage[] {
   const record = getCase(caseId);
   if (!record) throw new Error("Case not found.");
   const disc = record.discrepancies.find((d) => d.id === discrepancyId);
@@ -327,7 +363,16 @@ export function resolveDiscrepancy(
     correctValue,
     reason: reason ?? null,
   });
-  return appendMessage(record, "assistant", `Resolved ${disc.label}: using "${correctValue}".${reason ? ` Noted: ${reason}` : ""}`);
+  const wasInput = record.status === "needs_input";
+  recomputeStatus(record);
+  const out = [
+    appendMessage(record, "assistant", `Resolved ${disc.label}: using "${correctValue}".${reason ? ` Noted: ${reason}` : ""}`),
+  ];
+  if (wasInput && record.status === "ready") {
+    out.push(appendMessage(record, "assistant", "All blocking issues are resolved. Status: ready."));
+  }
+  saveCase(record);
+  return out;
 }
 
 export { LoopCapExceeded };
