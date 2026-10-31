@@ -1,6 +1,9 @@
 .env
+.env*.local
 skills/
 node_modules/
+.next/
+*.tsbuildinfo
 __pycache__/
 *.pyc
 .venv/
