@@ -232,6 +232,26 @@ export default function ChatPage() {
     return () => URL.revokeObjectURL(url);
   }, [localFiles, activeDoc]);
 
+  function goToLanding() {
+    setRecord(null);
+    setLocalFiles([]);
+    setActiveDoc(0);
+    setNote("");
+    setInput("");
+    setProcessTimedOut(false);
+    setAuditTrail([]);
+    setIsViewerOpen(true);
+    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  useEffect(() => {
+    function onPopState() {
+      goToLanding();
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
   async function refresh(caseId: string) {
     const res = await fetch(`/api/cases/${caseId}`);
     const data = (await res.json()) as { case: CaseRecord };
@@ -286,6 +306,7 @@ export default function ChatPage() {
         throw new Error(typeof err.error === "string" ? err.error : "Upload failed.");
       }
       await refresh(caseId);
+      window.history.pushState({ workspace: true }, "", window.location.href);
       try {
         setProcessTimedOut(await runProcess(caseId));
       } catch (error) {
@@ -462,6 +483,20 @@ export default function ChatPage() {
             </button>
           </div>
           <div className="mx-auto max-w-[800px]">
+          <button
+            onClick={() => {
+              goToLanding();
+              if (
+                window.history.state &&
+                (window.history.state as { workspace?: boolean }).workspace
+              ) {
+                window.history.back();
+              }
+            }}
+            className="text-slate-400 hover:text-white transition-colors text-sm font-medium flex items-center gap-2 mb-4"
+          >
+            ← Start Over
+          </button>
           <h1 className="mb-1 text-xl font-semibold tracking-tight text-white">Clearway — shipment readiness</h1>
           <p className="mb-4 text-sm text-slate-400">
             Upload the client bundle. I read it, compare documents, and flag disagreements. You decide what is correct.
