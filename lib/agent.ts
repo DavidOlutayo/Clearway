@@ -3,7 +3,7 @@ import { config } from "./config";
 import { MAX_DOCS_PER_FILE, MAX_FILES_PER_CASE, isSupportedMime, sha256Hex } from "./files";
 import { formatDiscrepancyCard, formatDocumentSummary } from "./format";
 import { appendEvent, appendMessage, getCase, saveCase } from "./store";
-import { takePending } from "./pending";
+import { peekPending, savePending, takePending } from "./pending";
 import { crosscheckDocuments, preserveResolved } from "./tools/crosscheckDocuments";
 import { extractDocuments } from "./tools/extractDocuments";
 import { parseCorrection } from "./tools/parseCorrection";
@@ -68,7 +68,7 @@ async function withTurnTimeout<T>(caseId: string, work: Promise<T>): Promise<T |
       appendMessage(
         record,
         "assistant",
-        "Still working on your bundle — it is taking longer than expected. Your files are saved; tap Process again in a moment.",
+        "Still working on your bundle — it is taking longer than expected. Your files are saved. Please click the 'Retry processing' button below to continue.",
       );
     }
   }
@@ -96,14 +96,14 @@ function coerceValue(field: string, raw: string): string | number {
 }
 
 // F1+F2+F3: recognise new files, extract, summarise, cross-check.
-export async function processPendingFiles(caseId: string): Promise<ChatMessage[]> {
+export async function processPendingFiles(caseId: string): Promise<{ messages: ChatMessage[]; timedOut: boolean }> {
   const record = getCase(caseId);
   if (!record) throw new Error("Case not found.");
   const out: ChatMessage[] = [];
   const guard = new TurnGuard(caseId);
 
   const result = await withTurnTimeout(caseId, (async () => {
-    const incoming = takePending(caseId);
+    const incoming = peekPending(caseId);
     if (incoming.length === 0) {
       say(record, out, "No new files to process. Upload photos or PDFs to add them to this case.");
       return true;
@@ -188,6 +188,18 @@ export async function processPendingFiles(caseId: string): Promise<ChatMessage[]
         });
       }
     }
+    // Claim the files only now that the slow/fallible work is done, so
+    // a timeout or model failure leaves the upload pending for a retry
+    // instead of stranding the case at 0 documents. Files that arrived
+    // mid-run (or sat past the per-run room) are restored, not eaten.
+    const processedHashes = new Set(accepted.map((file) => sha256Hex(file.buffer)));
+    const claimed = takePending(caseId);
+    const surplus = claimed.filter((file) => !processedHashes.has(sha256Hex(file.buffer)));
+    if (surplus.length > 0) savePending(caseId, surplus);
+    if (claimed.length === surplus.length) {
+      say(record, out, "These files were already processed in another run. Refresh to see the latest state.");
+      return true;
+    }
     record.documents.push(...created);
 
     guard.count("crosscheck_documents", { documents: record.documents.length });
@@ -243,9 +255,10 @@ export async function processPendingFiles(caseId: string): Promise<ChatMessage[]
 
   if (result === null) {
     // Timeout fallback message was already appended inside withTurnTimeout.
-    return record.messages.slice(-1);
+    // The peeked files were never claimed, so a retry reprocesses them.
+    return { messages: record.messages.slice(-1), timedOut: true };
   }
-  return out;
+  return { messages: out, timedOut: false };
 }
 
 // F2.3 + questions: corrections in plain language, plus "why?" and

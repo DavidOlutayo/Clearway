@@ -68,6 +68,14 @@ export function takePending(caseId: string): PendingFile[] {
   return files.map(revive);
 }
 
+// Non-destructive read: lets a run inspect the pending files and claim
+// them (takePending) only after the slow/fallible work succeeds, so a
+// timeout or model failure leaves the upload intact for a retry.
+export function peekPending(caseId: string): PendingFile[] {
+  const files = loadPending()[caseId] ?? [];
+  return files.map(revive);
+}
+
 export function peekPendingCount(caseId: string): number {
   return loadPending()[caseId]?.length ?? 0;
 }

@@ -9,9 +9,9 @@ export async function POST(
   { params }: { params: { id: string } },
 ): Promise<Response> {
   try {
-    const messages = await processPendingFiles(params.id);
+    const result = await processPendingFiles(params.id);
     const record = getCase(params.id);
-    return NextResponse.json({ messages, case: record });
+    return NextResponse.json({ messages: result.messages, timedOut: result.timedOut, case: record });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Processing failed.";
     const record = getCase(params.id);

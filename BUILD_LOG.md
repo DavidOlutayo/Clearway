@@ -11,3 +11,9 @@
 - **31 Oct 2026**: Case status now follows one rule (needs_input iff a Blocking discrepancy is open): resolving the last blocker via button or chat correction flips to ready with a confirmation message.
 - **31 Oct 2026**: Tailwind v3 styling pass on the chat UI (same layout/state/flow): bubble shadows, primary buttons with hover grow, severity badges, off-white page.
 - **31 Oct 2026**: Enterprise SaaS restyle (same layout/state/flow): slate page, floating white panels, label/value typography in bubbles, semantic badges, dark resolve buttons.
+- **1 Nov 2026**: Fixed stuck-at-0-documents after process timeout: pending files are now peeked, not consumed, and claimed only after extraction succeeds (surplus restored); /process reports timedOut and the chat offers a Retry processing button.
+- **1 Nov 2026**: Ultimate Combo in app/page.tsx: collapsible Document Viewer (Hide/Show toggle, full-width chat when hidden) and Session Audit Trail panel (override logs, shown when status is ready). Backend upload fix untouched.
+- **1 Nov 2026**: Resolved rows gained an Undo button that reopens that row's override choices; re-resolving overwrites via /resolve and appends a fresh audit entry (original kept).
+- **1 Nov 2026**: Chat feed wrapped in mx-auto max-w-[800px] so it stays centered at full width when the viewer is hidden; toggle stays top-right.
+- **1 Nov 2026**: Cinematic restyle (page.tsx only): quote-free value spans, glossy pill override buttons, slideUpFade entrances, glass cards/panel, hover micro-interactions. All state/logic/backend untouched.
+- **1 Nov 2026**: className-only polish: pills simplified to shadow-md/border-slate-200, glass card+panel borders to border-slate-100. No tag/state/layout changes.
