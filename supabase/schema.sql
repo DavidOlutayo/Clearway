@@ -32,3 +32,17 @@ create table if not exists events (
 );
 
 create index if not exists events_case_created_idx on events (case_id, created_at);
+
+-- Live demo rate limiting: one row per full run (each /process call).
+-- Visitor identity is a browser cookie id plus the client IP from the
+-- x-forwarded-for header. No login; ids are random and unguessable.
+create table if not exists demo_runs (
+  id uuid primary key default gen_random_uuid(),
+  visitor_id text not null,
+  ip text not null default '',
+  created_at timestamptz not null default now()
+);
+
+create index if not exists demo_runs_visitor_created_idx on demo_runs (visitor_id, created_at);
+create index if not exists demo_runs_ip_created_idx on demo_runs (ip, created_at);
+create index if not exists demo_runs_created_idx on demo_runs (created_at);

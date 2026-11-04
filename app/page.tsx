@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { REPLAY_LABEL, getReplayAudit, getReplayCase } from "@/lib/replay";
 import type { CaseRecord, CaseStatus, ChatMessage, Discrepancy } from "@/lib/types";
 
 async function postJson(url: string, body: unknown) {
@@ -10,8 +11,26 @@ async function postJson(url: string, body: unknown) {
     body: JSON.stringify(body),
   });
   const data = (await res.json()) as Record<string, unknown>;
-  if (!res.ok) throw new Error((data.error as string) ?? "Request failed.");
+  if (!res.ok) {
+    // Carry the status so callers can treat a 429 rate-limit/paused
+    // response as a replay offer instead of an alert.
+    const error = new Error((data.error as string) ?? "Request failed.") as Error & {
+      status?: number;
+      replay?: boolean;
+    };
+    error.status = res.status;
+    error.replay = (data.replay as boolean) === true;
+    throw error;
+  }
   return data;
+}
+
+function isReplayOffer(error: unknown): error is Error & { status?: number } {
+  return (
+    error instanceof Error &&
+    (error as { status?: number; replay?: boolean }).status === 429 &&
+    (error as { status?: number; replay?: boolean }).replay === true
+  );
 }
 
 function BubbleLabelValue({ text }: { text: string }) {
@@ -113,11 +132,13 @@ function DiscrepancyRow({
   caseId,
   onResolved,
   onOverride,
+  readOnly = false,
 }: {
   disc: Discrepancy;
   caseId: string;
   onResolved: (record: CaseRecord) => void;
   onOverride: (disc: Discrepancy, chosenValue: string) => void;
+  readOnly?: boolean;
 }) {
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
@@ -147,15 +168,46 @@ function DiscrepancyRow({
         <span className="text-green-300">✓ {disc.label}: </span>
         <span className="text-slate-400 font-medium">using</span>{" "}
         <span className="text-white font-bold">{disc.resolvedValue}</span>
-        <button
-          onClick={() => {
-            setReason("");
-            setReopened(true);
-          }}
-          className="text-sm text-[#79dce8] hover:text-white hover:underline ml-3 transition-all duration-300"
-        >
-          Undo
-        </button>
+        {!readOnly && (
+          <button
+            onClick={() => {
+              setReason("");
+              setReopened(true);
+            }}
+            className="text-sm text-[#79dce8] hover:text-white hover:underline ml-3 transition-all duration-300"
+          >
+            Undo
+          </button>
+        )}
+      </div>
+    );
+  }
+  if (readOnly) {
+    // Saved replay: show the finding with both values and sources, but no
+    // inputs — there is no live case behind it to resolve.
+    return (
+      <div className="cinematic-enter my-1.5 rounded-xl border border-white/10 bg-white/5 p-2 shadow-lg backdrop-blur-md text-white">
+        <div className="text-[13px] font-semibold">
+          <span
+            className={`rounded-md border px-2 py-1 text-xs font-bold ${
+              disc.severity === "Blocking"
+                ? "border-red-500/30 bg-red-500/10 text-red-200"
+                : disc.severity === "Check"
+                  ? "border-yellow-500/30 bg-yellow-500/10 text-yellow-200"
+                  : "border-white/10 bg-white/10 text-slate-300"
+            }`}
+          >
+            {disc.severity}
+          </span>
+          : {disc.label}
+        </div>
+        <div className="text-[13px]">
+          <span className="font-semibold text-white bg-white/10 px-2 py-0.5 rounded-md">{disc.valueA}</span>
+          <span className="text-slate-400"> ({disc.sourceA}) vs </span>
+          <span className="font-semibold text-white bg-white/10 px-2 py-0.5 rounded-md">{disc.valueB}</span>
+          <span className="text-slate-400"> ({disc.sourceB})</span>
+        </div>
+        <div className="my-1 text-xs text-slate-300">{disc.suggestion}</div>
       </div>
     );
   }
@@ -219,7 +271,23 @@ export default function ChatPage() {
   const [processTimedOut, setProcessTimedOut] = useState(false);
   const [isViewerOpen, setIsViewerOpen] = useState(true);
   const [auditTrail, setAuditTrail] = useState<AuditEntry[]>([]);
+  // Live demo guards: demoLive comes from the server (DEMO_LIVE env);
+  // limitNotice carries a 429 message; replay holds the saved fixture.
+  const [demoLive, setDemoLive] = useState(true);
+  const [limitNotice, setLimitNotice] = useState<string | null>(null);
+  const [replay, setReplay] = useState<CaseRecord | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    fetch("/api/demo-status")
+      .then((res) => res.json())
+      .then((data) => {
+        if (typeof (data as { demoLive?: unknown }).demoLive === "boolean") {
+          setDemoLive((data as { demoLive: boolean }).demoLive);
+        }
+      })
+      .catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     const file = localFiles[activeDoc] ?? null;
@@ -234,6 +302,8 @@ export default function ChatPage() {
 
   function goToLanding() {
     setRecord(null);
+    setReplay(null);
+    setLimitNotice(null);
     setLocalFiles([]);
     setActiveDoc(0);
     setNote("");
@@ -242,6 +312,14 @@ export default function ChatPage() {
     setAuditTrail([]);
     setIsViewerOpen(true);
     if (fileRef.current) fileRef.current.value = "";
+  }
+
+  function startReplay() {
+    setReplay(getReplayCase());
+    setAuditTrail(getReplayAudit());
+    setLimitNotice(null);
+    setIsViewerOpen(true);
+    window.history.pushState({ workspace: true }, "", window.location.href);
   }
 
   useEffect(() => {
@@ -321,7 +399,13 @@ export default function ChatPage() {
       if (caseId !== "") {
         await refresh(caseId).catch(() => undefined);
       }
-      alert(error instanceof Error ? error.message : "Start failed.");
+      // A 429 is a replay offer, not an error: show the banner with the
+      // saved replay instead of an alert.
+      if (isReplayOffer(error)) {
+        setLimitNotice(error.message);
+      } else {
+        alert(error instanceof Error ? error.message : "Start failed.");
+      }
     } finally {
       setBusy(false);
     }
@@ -333,8 +417,14 @@ export default function ChatPage() {
     try {
       setProcessTimedOut(await runProcess(record.id));
     } catch (error) {
-      setProcessTimedOut(true);
-      alert(error instanceof Error ? error.message : "Retry failed.");
+      if (isReplayOffer(error)) {
+        setProcessTimedOut(false);
+        setLimitNotice(error.message);
+        await refresh(record.id).catch(() => undefined);
+      } else {
+        setProcessTimedOut(true);
+        alert(error instanceof Error ? error.message : "Retry failed.");
+      }
     } finally {
       setBusy(false);
     }
@@ -356,7 +446,7 @@ export default function ChatPage() {
 
   const activeFile = localFiles[activeDoc] ?? null;
 
-  if (!record) {
+  if (!record && !replay) {
     return (
       <main className="relative h-screen w-full overflow-hidden flex flex-col items-center justify-center bg-black">
         <style>{`
@@ -384,34 +474,61 @@ export default function ChatPage() {
             Upload the client bundle. I read it, compare documents, and flag disagreements. You decide what is correct.
           </p>
 
-          <section className="w-full">
-            <input
-              value={note}
-              onChange={(event) => setNote(event.target.value)}
-              placeholder="Short note (optional), e.g. Ghana → Kenya, textiles"
-              className="bg-white/10 backdrop-blur-md border border-white/20 rounded-full px-6 py-3 text-white placeholder-white/60 shadow-lg outline-none focus:ring-2 focus:ring-[#79dce8] transition-all w-full max-w-md mx-auto mb-4"
-            />
-            <input
-              ref={fileRef}
-              type="file"
-              accept="image/*,application/pdf"
-              multiple
-              className="bg-white/10 backdrop-blur-md border border-white/20 rounded-full px-6 py-3 text-sm text-white placeholder-white/60 shadow-lg outline-none focus:ring-2 focus:ring-[#79dce8] transition-all w-full max-w-md mx-auto mb-4 file:mr-3 file:rounded-full file:border-0 file:bg-white/20 file:px-4 file:py-1 file:text-sm file:font-medium file:text-white hover:file:bg-white/30"
-            />
-            <div className="mt-6">
+          {demoLive ? (
+            <section className="w-full">
+              <input
+                value={note}
+                onChange={(event) => setNote(event.target.value)}
+                placeholder="Short note (optional), e.g. Ghana → Kenya, textiles"
+                className="bg-white/10 backdrop-blur-md border border-white/20 rounded-full px-6 py-3 text-white placeholder-white/60 shadow-lg outline-none focus:ring-2 focus:ring-[#79dce8] transition-all w-full max-w-md mx-auto mb-4"
+              />
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/*,application/pdf"
+                multiple
+                className="bg-white/10 backdrop-blur-md border border-white/20 rounded-full px-6 py-3 text-sm text-white placeholder-white/60 shadow-lg outline-none focus:ring-2 focus:ring-[#79dce8] transition-all w-full max-w-md mx-auto mb-4 file:mr-3 file:rounded-full file:border-0 file:bg-white/20 file:px-4 file:py-1 file:text-sm file:font-medium file:text-white hover:file:bg-white/30"
+              />
+              <div className="mt-6">
+                <button
+                  disabled={busy}
+                  onClick={startCase}
+                  className="rounded-full bg-white text-[#04101f] font-bold tracking-widest uppercase px-10 py-4 mt-4 hover:scale-105 transition-transform duration-300 shadow-[0_0_40px_rgba(255,255,255,0.3)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100"
+                >
+                  {busy ? "Working…" : "Start case"}
+                </button>
+              </div>
+              <div className="mt-4">
+                <button
+                  onClick={startReplay}
+                  className="text-sm text-white/70 hover:text-white hover:underline transition-all"
+                >
+                  or view the {REPLAY_LABEL.toLowerCase()}
+                </button>
+              </div>
+            </section>
+          ) : (
+            <section className="w-full">
+              <p className="mb-6 text-sm text-white/80">
+                Live runs are paused right now, but you can still explore the full demo as a {REPLAY_LABEL.toLowerCase()}.
+              </p>
               <button
-                disabled={busy}
-                onClick={startCase}
-                className="rounded-full bg-white text-[#04101f] font-bold tracking-widest uppercase px-10 py-4 mt-4 hover:scale-105 transition-transform duration-300 shadow-[0_0_40px_rgba(255,255,255,0.3)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100"
+                onClick={startReplay}
+                className="rounded-full bg-white text-[#04101f] font-bold tracking-widest uppercase px-10 py-4 mt-4 hover:scale-105 transition-transform duration-300 shadow-[0_0_40px_rgba(255,255,255,0.3)]"
               >
-                {busy ? "Working…" : "Start case"}
+                View {REPLAY_LABEL.toLowerCase()}
               </button>
-            </div>
-          </section>
+            </section>
+          )}
         </div>
       </main>
     );
   }
+
+  // Workspace shows the live case, or the saved replay (same components,
+  // read-only) when replay mode is on.
+  const view = replay ?? record;
+  if (!view) return null;
 
   return (
     <main className="h-screen flex w-full overflow-hidden bg-[#04101f] text-slate-200">
@@ -460,7 +577,7 @@ export default function ChatPage() {
               <div className="rounded-lg bg-slate-700 p-4">
                 <p className="mb-2 text-sm text-slate-200">Preview unavailable — these files were uploaded in an earlier session.</p>
                 <ul className="space-y-1">
-                  {record.documents.map((doc) => (
+                  {view.documents.map((doc) => (
                     <li key={doc.id} className="text-xs text-slate-300">
                       {doc.fileName} · {doc.mimeType}
                     </li>
@@ -501,57 +618,80 @@ export default function ChatPage() {
           <p className="mb-4 text-sm text-slate-400">
             Upload the client bundle. I read it, compare documents, and flag disagreements. You decide what is correct.
           </p>
+          {replay && (
+            <div className="cinematic-enter mb-3 rounded-xl border border-[#79dce8]/30 bg-[#79dce8]/10 px-3 py-2 text-[13px] text-slate-200">
+              <span className="font-semibold text-[#79dce8]">{REPLAY_LABEL}</span>
+              <span className="text-slate-300"> — a recording of a real run, read-only. Live runs are paused or limited right now.</span>
+            </div>
+          )}
+          {!replay && limitNotice && (
+            <div className="cinematic-enter mb-3 rounded-xl border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-[13px] text-slate-200">
+              <p className="mb-2">{limitNotice}</p>
+              <button
+                onClick={startReplay}
+                className="rounded-full bg-white text-[#04101f] px-5 py-2 font-medium text-[13px] hover:scale-[1.02] transition-all"
+              >
+                View {REPLAY_LABEL.toLowerCase()}
+              </button>
+            </div>
+          )}
           <section>
-            {record.messages.map((message) => (
+            {view.messages.map((message) => (
               <Bubble
                 key={message.id}
                 message={message}
-                status={record.status}
-                hasTimeoutMessage={record.messages.some((m) => m.text.startsWith("Still working"))}
+                status={view.status}
+                hasTimeoutMessage={view.messages.some((m) => m.text.startsWith("Still working"))}
                 busy={busy}
               />
             ))}
           </section>
 
-          {record.discrepancies.length > 0 && (
+          {view.discrepancies.length > 0 && (
             <section className="mt-3">
               <h2 className="mt-6 mb-4 text-[15px] font-semibold text-white">Disagreements</h2>
-              {record.discrepancies.map((disc) => (
+              {view.discrepancies.map((disc) => (
                 <DiscrepancyRow
                   key={disc.id}
                   disc={disc}
-                  caseId={record.id}
-                  onResolved={setRecord}
-                  onOverride={(d, chosenValue) =>
-                    setAuditTrail((prev) => [
-                      ...prev,
-                      { timestamp: new Date().toISOString(), issue: d.label, resolution: chosenValue },
-                    ])
+                  caseId={view.id}
+                  onResolved={replay ? () => undefined : setRecord}
+                  onOverride={
+                    replay
+                      ? () => undefined
+                      : (d, chosenValue) =>
+                          setAuditTrail((prev) => [
+                            ...prev,
+                            { timestamp: new Date().toISOString(), issue: d.label, resolution: chosenValue },
+                          ])
                   }
+                  readOnly={replay !== null}
                 />
               ))}
             </section>
           )}
 
-          <section className="mt-3 flex gap-2">
-            <input
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") void send();
-              }}
-              placeholder={'Correct me ("the quantity is 500") or ask "what\'s missing?"'}
-              className="flex-1 rounded-lg border border-white/20 bg-white/10 px-3 py-2.5 text-sm text-white placeholder-white/50 outline-none focus:border-[#79dce8] focus:ring-1 focus:ring-[#79dce8]"
-            />
-            <button
-              disabled={busy}
-              onClick={() => void send()}
-              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-all hover:scale-105 hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100"
-            >
-              Send
-            </button>
-          </section>
-          {processTimedOut && (
+          {!replay && (
+            <section className="mt-3 flex gap-2">
+              <input
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void send();
+                }}
+                placeholder={'Correct me ("the quantity is 500") or ask "what\'s missing?"'}
+                className="flex-1 rounded-lg border border-white/20 bg-white/10 px-3 py-2.5 text-sm text-white placeholder-white/50 outline-none focus:border-[#79dce8] focus:ring-1 focus:ring-[#79dce8]"
+              />
+              <button
+                disabled={busy}
+                onClick={() => void send()}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-all hover:scale-105 hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100"
+              >
+                Send
+              </button>
+            </section>
+          )}
+          {!replay && processTimedOut && (
             <button
               disabled={busy}
               onClick={() => void retryProcess()}
@@ -561,9 +701,9 @@ export default function ChatPage() {
             </button>
           )}
           <p className="mt-2 text-xs text-slate-500">
-            Case {record.id.slice(0, 8)} · {record.status} · {record.documents.length} documents
+            Case {replay ? "replay" : view.id.slice(0, 8)} · {view.status} · {view.documents.length} documents
           </p>
-          {record.status === "ready" && (
+          {view.status === "ready" && (
             <section className="cinematic-enter bg-slate-900/80 border-l-4 border-[#79dce8] p-4 rounded-r-xl mt-6">
               <h2 className="mb-2 text-sm font-semibold text-slate-200">Session Audit Trail</h2>
               {auditTrail.length === 0 ? (

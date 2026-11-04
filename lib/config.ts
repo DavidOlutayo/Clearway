@@ -6,6 +6,9 @@ export const config = {
   turnTimeoutMs: Number(process.env.AGENT_TURN_TIMEOUT_MS ?? 55000),
   supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL ?? "",
   supabaseAnonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "",
+  // Live demo switch. Only an explicit "false" turns live runs off;
+  // anything else (including unset) keeps them on.
+  demoLive: process.env.DEMO_LIVE !== "false",
 };
 
 export function isSupabaseConfigured(): boolean {
