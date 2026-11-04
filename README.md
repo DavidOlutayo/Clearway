@@ -1,3 +1,4 @@
+https://youtu.be/befc3_Ot6es
 Built during the Meta Global AI Developer Hackathon, 27 Oct to 4 Nov 2026.
 
 # Clearway — Clearance Readiness Copilot
